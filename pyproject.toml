@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Ton-Connect-CLI"
+version = "1.0.0"
+description = "Headless TonConnect client for tc:// authorization flows."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+dependencies = [
+    "aiohttp",
+    "orjson",
+    "python-dotenv",
+    "pynacl",
+    "pytoniq",
+    "loguru",
+]
+
+[tool.setuptools.packages.find]
+include = ["TonConnect"]
