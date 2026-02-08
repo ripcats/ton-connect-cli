@@ -209,4 +209,4 @@ await client.init(allowed_domains=["trusted-app.com"])
 - [TonAPI Bridge](https://tonapi.io/)
 - [pytoniq](https://github.com/yungwine/pytoniq)
 
-Вопросы? Открывайте [Issues](https://github.com/yourusername/ton-connect-cli/issues)
+Вопросы? Открывайте [Issues](https://github.com/ripcats/ton-connect-cli/issues)
