@@ -4,7 +4,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.1.0-green.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.2.0-green.svg)](pyproject.toml)
 
 ## 📋 Описание
 
@@ -47,7 +47,10 @@ from TonConnect import connect_tc_url
 
 async def main():
     tc_url = "tc://connect?v=2&id=abc123&r=eyJ..."
-    result = await connect_tc_url(tc_url)
+    result = await connect_tc_url(
+        tc_url,
+        allowed_domains=["app.dedust.io", "ston.fi"],  # опционально
+    )
 
     if result.ok:
         print(f"✅ Подключено за {result.data['elapsed_ms']} ms")
@@ -68,7 +71,7 @@ asyncio.run(main())
 ```python
 from TonConnect import TonConnectClient
 
-async with TonConnectClient(mnemonic="your 24 words...") as client:
+async with TonConnectClient(mnemonic="your 24 words...", allowed_domains=["app.dedust.io", "ston.fi"]) as client:
     result = await client.connect(tc_url)
 ```
 
@@ -92,13 +95,21 @@ await client.close()
 | `request_timeout` | `float \| None` | `30` | Таймаут HTTP запросов (сек) |
 | `retry_attempts` | `int` | `3` | Количество попыток отправки на bridge |
 | `retry_base` | `float` | `0.5` | Базовая задержка backoff (сек) |
+| `allowed_domains` | `list[str] \| None` | `None` (все домены) | Whitelist доменов. Можно изменить позже через свойство `allowed_domains` |
 
 #### `init(allowed_domains=None)`
 
 Инициализирует кошелёк и HTTP-сессию. При использовании context manager вызывается автоматически.
 
+Если `allowed_domains` не передан (или `None`), уже установленный вайтлист (из конструктора или свойства) **сохраняется**. Явная передача списка переопределяет его.
+
 ```python
+# задать домены при init()
 await client.init(allowed_domains=["app.dedust.io", "ston.fi"])
+
+# изменить вайтлист после инициализации
+client.allowed_domains = ["ston.fi"]   # заменить целиком
+client.allowed_domains = None          # отключить фильтрацию (все домены разрешены)
 ```
 
 #### `connect(tc_url) → TonConnectResult`
@@ -175,8 +186,9 @@ from TonConnect.types import WalletVersion
 
 result = await connect_tc_url(
     tc_url="tc://...",
-    mnemonic="your 24 words...",        # опционально
-    wallet_version=WalletVersion.V5R1   # опционально
+    mnemonic="your 24 words...",            # опционально
+    wallet_version=WalletVersion.V5R1,      # опционально
+    allowed_domains=["app.dedust.io"],      # опционально
 )
 ```
 
@@ -220,15 +232,28 @@ asyncio.run(main())
 from TonConnect import TonConnectClient
 from TonConnect.types import TonConnectResultCode
 
-async def secure_connect(tc_url: str):
-    async with TonConnectClient() as client:
-        await client.init(allowed_domains=["app.dedust.io", "ston.fi", "app.evaa.finance"])
-        result = await client.connect(tc_url)
+TRUSTED = ["app.dedust.io", "ston.fi", "app.evaa.finance"]
 
-        if result.code == TonConnectResultCode.FORBIDDEN:
-            print(f"⛔ Домен заблокирован: {result.error_message}")
-        elif result.ok:
-            print(f"✅ Подключено за {result.data['elapsed_ms']} ms")
+# вариант 1 — задать сразу в конструкторе (работает с context manager без init())
+async with TonConnectClient(allowed_domains=TRUSTED) as client:
+    result = await client.connect(tc_url)
+
+    if result.code == TonConnectResultCode.FORBIDDEN:
+        print(f"⛔ Домен заблокирован: {result.error_message}")
+    elif result.ok:
+        print(f"✅ Подключено за {result.data['elapsed_ms']} ms")
+
+# вариант 2 — переиспользуемый клиент с динамическим вайтлистом
+async with TonConnectClient(allowed_domains=TRUSTED) as client:
+    result1 = await client.connect(tc_url_1)
+
+    # расширить вайтлист
+    client.allowed_domains = TRUSTED + ["new-dapp.io"]
+    result2 = await client.connect(tc_url_2)
+
+    # снять ограничения
+    client.allowed_domains = None
+    result3 = await client.connect(tc_url_3)
 ```
 
 ### Настройка retry и таймаутов

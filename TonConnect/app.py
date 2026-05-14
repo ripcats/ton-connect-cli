@@ -53,6 +53,7 @@ class TonConnectClient:
         request_timeout: Optional[float] = 30,
         retry_attempts: int = 3,
         retry_base: float = 0.5,
+        allowed_domains: Optional[list[str]] = None,
     ):
         """
         Args:
@@ -64,6 +65,10 @@ class TonConnectClient:
             request_timeout: Timeout for HTTP requests (seconds).
             retry_attempts: Number of bridge send retries on failure.
             retry_base: Base delay (seconds) for exponential backoff between retries.
+            allowed_domains: Optional whitelist of domains. Connections to domains not
+                             in this list will return FORBIDDEN. Can also be set or
+                             changed later via the ``allowed_domains`` property or the
+                             ``allow_domain`` / ``deny_domain`` helpers.
         """
         self.mnemonic = mnemonic or os.getenv("TON_WALLET_MNEMONIC", "")
         self.bridge_url = bridge_url or "https://bridge.tonapi.io/bridge"
@@ -73,9 +78,33 @@ class TonConnectClient:
         self.retry_attempts = retry_attempts
         self.retry_base = retry_base
         self._wallet: Optional[HeadlessTonConnectWallet] = None
-        self._allowed_domains: Optional[set[str]] = None
+        self._allowed_domains: Optional[set[str]] = sanitize_allowed_domains(allowed_domains)
         self._http_session: Optional[aiohttp.ClientSession] = None
         self._bridge_client: Optional[BridgeClient] = None
+
+    # ------------------------------------------------------------------
+    # Allowed-domains management
+    # ------------------------------------------------------------------
+
+    @property
+    def allowed_domains(self) -> Optional[set[str]]:
+        """Current domain whitelist (``None`` means all domains are allowed)."""
+        return self._allowed_domains
+
+    @allowed_domains.setter
+    def allowed_domains(self, domains: Optional[list[str]]) -> None:
+        """Replace the whitelist entirely.
+
+        Pass ``None`` to disable filtering (allow all domains).
+
+        Example::
+
+            client.allowed_domains = ["app.example.com", "dapp.io"]
+            client.allowed_domains = None  # allow everything
+        """
+        self._allowed_domains = sanitize_allowed_domains(domains)
+
+
 
     async def __aenter__(self) -> "TonConnectClient":
         await self.init()
@@ -90,8 +119,11 @@ class TonConnectClient:
         Args:
             allowed_domains: Optional whitelist of domains. Connections to
                              domains not in this list will return FORBIDDEN.
+                             If ``allowed_domains`` was already set via the constructor
+                             or the property, passing ``None`` here leaves it unchanged.
         """
-        self._allowed_domains = sanitize_allowed_domains(allowed_domains)
+        if allowed_domains is not None:
+            self._allowed_domains = sanitize_allowed_domains(allowed_domains)
         await self._init_wallet()
 
     async def _init_wallet(self) -> None:
@@ -272,6 +304,7 @@ async def connect_tc_url(
     tc_url: str,
     mnemonic: Optional[str] = None,
     wallet_version: Optional[WalletVersion] = None,
+    allowed_domains: Optional[list[str]] = None,
 ) -> TonConnectResult:
     """One-shot helper: create a client, connect, and close.
 
@@ -279,6 +312,13 @@ async def connect_tc_url(
         tc_url: TonConnect deep link starting with ``tc://``.
         mnemonic: 24-word seed phrase. Falls back to TON_WALLET_MNEMONIC env var.
         wallet_version: WalletVersion.V5R1 or WalletVersion.V4R2.
+        allowed_domains: Optional whitelist of domains. Connections to domains not
+                         in this list will return FORBIDDEN. Pass ``None`` to allow
+                         all domains.
     """
-    async with TonConnectClient(mnemonic=mnemonic, wallet_version=wallet_version) as client:
+    async with TonConnectClient(
+        mnemonic=mnemonic,
+        wallet_version=wallet_version,
+        allowed_domains=allowed_domains,
+    ) as client:
         return await client.connect(tc_url)
