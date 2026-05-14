@@ -4,19 +4,20 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-1.1.0-green.svg)](pyproject.toml)
 
 ## 📋 Описание
 
-**TonConnect CLI** — это headless-клиент для программной обработки TonConnect авторизаций. Позволяет автоматически подключаться к dApps через `tc://` ссылки без взаимодействия с UI кошелька.
+**TonConnect CLI** — headless-клиент для программной обработки TonConnect авторизаций. Позволяет автоматически подключаться к dApps через `tc://` ссылки без взаимодействия с UI кошелька.
 
 ### Основные возможности
 
 ✅ Полная поддержка TonConnect 2.0 протокола  
 ✅ Автоматическая генерация ton_proof для безопасной авторизации  
-✅ Поддержка кошельков V4R2 и V5R1  
+✅ Поддержка кошельков V4R2 и V5R1 через `WalletVersion` enum  
 ✅ Whitelist доменов для защиты от фишинга  
-✅ Retry механизм для bridge запросов  
-✅ Асинхронная архитектура с timeout управлением  
+✅ Retry с экспоненциальным backoff для bridge запросов  
+✅ Асинхронный context manager с автоматическим закрытием  
 ✅ Безопасная очистка мнемоник из памяти
 
 ## 🚀 Быстрый старт
@@ -47,9 +48,9 @@ from TonConnect import connect_tc_url
 async def main():
     tc_url = "tc://connect?v=2&id=abc123&r=eyJ..."
     result = await connect_tc_url(tc_url)
-    
-    if result.code == "DAPP_CONNECTED":
-        print(f"✅ Подключено! ID: {result.data['id']}")
+
+    if result.ok:
+        print(f"✅ Подключено за {result.data['elapsed_ms']} ms")
     else:
         print(f"❌ Ошибка: {result.error_message}")
 
@@ -58,63 +59,132 @@ asyncio.run(main())
 
 ## 📚 Документация
 
-### Основные классы
+### TonConnectClient
 
-#### TonConnectClient
+Основной класс. Поддерживает два стиля использования.
 
-Главный класс для работы с TonConnect.
+**Context manager (рекомендуется):**
 
 ```python
 from TonConnect import TonConnectClient
 
-client = TonConnectClient(
-    mnemonic="your 24 words...",           # или через TON_WALLET_MNEMONIC
-    bridge_url="https://bridge.tonapi.io/bridge",  # опционально
-    connect_timeout=10,                     # таймаут подключения (сек)
-    request_timeout=30                      # таймаут запросов (сек)
-)
+async with TonConnectClient(mnemonic="your 24 words...") as client:
+    result = await client.connect(tc_url)
+```
 
-# Инициализация с whitelist доменов
-await client.init(allowed_domains=["app.example.com", "dapp.io"])
+**Ручное управление жизненным циклом:**
 
-# Подключение к dApp
+```python
+client = TonConnectClient(mnemonic="your 24 words...")
+await client.init()
 result = await client.connect(tc_url)
-
-# Закрытие соединений
 await client.close()
 ```
 
-### Результаты операций
+#### Параметры конструктора
 
-#### TonConnectResult
+| Параметр | Тип | По умолчанию | Описание |
+|----------|-----|-------------|----------|
+| `mnemonic` | `str \| None` | `TON_WALLET_MNEMONIC` из env | 24 слова seed phrase |
+| `bridge_url` | `str \| None` | `bridge.tonapi.io` | TonConnect bridge URL |
+| `wallet_version` | `WalletVersion \| None` | `TON_WALLET_VERSION` из env → V5R1 | Версия контракта кошелька |
+| `connect_timeout` | `float \| None` | `10` | Таймаут инициализации кошелька (сек) |
+| `request_timeout` | `float \| None` | `30` | Таймаут HTTP запросов (сек) |
+| `retry_attempts` | `int` | `3` | Количество попыток отправки на bridge |
+| `retry_base` | `float` | `0.5` | Базовая задержка backoff (сек) |
+
+#### `init(allowed_domains=None)`
+
+Инициализирует кошелёк и HTTP-сессию. При использовании context manager вызывается автоматически.
 
 ```python
-@dataclass
+await client.init(allowed_domains=["app.dedust.io", "ston.fi"])
+```
+
+#### `connect(tc_url) → TonConnectResult`
+
+Подключается к dApp по `tc://` ссылке. Бросает `TonConnectException` если URL невалиден. В остальных случаях возвращает `TonConnectResult`.
+
+#### `close()`
+
+Закрывает все соединения и освобождает ресурсы. При использовании context manager вызывается автоматически.
+
+---
+
+### WalletVersion
+
+Enum для выбора версии контракта кошелька.
+
+```python
+from TonConnect.types import WalletVersion
+
+async with TonConnectClient(wallet_version=WalletVersion.V4R2) as client:
+    ...
+```
+
+| Значение | Описание |
+|----------|----------|
+| `WalletVersion.V5R1` | Wallet V5R1 (по умолчанию) |
+| `WalletVersion.V4R2` | Wallet V4R2 |
+
+---
+
+### TonConnectResult
+
+```python
+@dataclass(frozen=True)
 class TonConnectResult:
-    code: TonConnectResultCode  # DAPP_CONNECTED | DAPP_CONNECTED_FAILED | FORBIDDEN
-    data: Optional[dict]        # данные подключения
-    error_code: Optional[TonConnectErrorCode]  # код ошибки
-    error_message: Optional[str]  # описание ошибки
+    code: TonConnectResultCode
+    data: Optional[dict]
+    error_code: Optional[TonConnectErrorCode]
+    error_message: Optional[str]
+
+    @property
+    def ok(self) -> bool: ...
 ```
 
-**Пример обработки:**
+`result.ok` — быстрая проверка успеха вместо сравнения с enum.
+
+**Коды результата:**
+
+| `result.code` | Описание |
+|---------------|----------|
+| `DAPP_CONNECTED` | Подключение успешно |
+| `FORBIDDEN` | Домен заблокирован whitelist'ом |
+| `DAPP_CONNECTED_FAILED` | Ошибка подключения |
+
+**Поля `result.data` при успехе:**
 
 ```python
-result = await client.connect(tc_url)
-
-match result.code:
-    case "DAPP_CONNECTED":
-        print(f"Успех! Event ID: {result.data['id']}")
-        print(f"Время: {result.data['elapsed_ms']} ms")
-    case "FORBIDDEN":
-        print(f"Домен заблокирован: {result.error_message}")
-    case "DAPP_CONNECTED_FAILED":
-        print(f"Ошибка [{result.error_code}]: {result.error_message}")
+{
+    "id": int,          # timestamp события в ms
+    "event": "connect",
+    "elapsed_ms": int   # время выполнения
+}
 ```
 
-## 💡 Примеры использования
+---
 
-### Пример 1: Интерактивный CLI
+### connect_tc_url (хелпер)
+
+Одноразовое подключение без ручного управления клиентом:
+
+```python
+from TonConnect import connect_tc_url
+from TonConnect.types import WalletVersion
+
+result = await connect_tc_url(
+    tc_url="tc://...",
+    mnemonic="your 24 words...",        # опционально
+    wallet_version=WalletVersion.V5R1   # опционально
+)
+```
+
+---
+
+## 💡 Примеры
+
+### Интерактивный CLI
 
 ```python
 import asyncio
@@ -122,74 +192,77 @@ import json
 from TonConnect import TonConnectClient, TonConnectException
 
 async def main():
-    client = TonConnectClient()
-    
     try:
-        await client.init()
+        async with TonConnectClient() as client:
+            while True:
+                tc_url = input("TON Connect URL (exit для выхода): ").strip()
+                if tc_url.lower() in {"exit", "quit"}:
+                    break
+                if not tc_url:
+                    continue
+
+                result = await client.connect(tc_url)
+                print(json.dumps({
+                    "code": result.code.value,
+                    "data": result.data,
+                    "error_code": result.error_code.value if result.error_code else None,
+                    "error_message": result.error_message,
+                }, indent=2))
     except TonConnectException as e:
-        print(f"❌ Ошибка инициализации: {e}")
-        return
-    
-    try:
-        while True:
-            tc_url = input("TON Connect URL (exit для выхода): ").strip()
-            
-            if tc_url.lower() in {"exit", "quit"}:
-                break
-            
-            if not tc_url:
-                continue
-            
-            result = await client.connect(tc_url)
-            print(json.dumps({
-                "code": result.code.value,
-                "data": result.data,
-                "error_code": result.error_code.value if result.error_code else None,
-                "error_message": result.error_message
-            }, indent=2))
-    finally:
-        await client.close()
+        print(f"❌ Ошибка инициализации [{e.code}]: {e}")
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
 ```
-
-### Пример 2: Whitelist доменов
-
-```python
-async def secure_connect():
-    client = TonConnectClient()
-    
-    # Разрешаем только проверенные домены
-    await client.init(allowed_domains=[
-        "app.dedust.io",
-        "ston.fi",
-        "app.evaa.finance"
-    ])
-    
-    # Попытка подключения
-    result = await client.connect(tc_url)
-    
-    if result.code == "FORBIDDEN":
-        print(f"⛔ Домен заблокирован: {result.error_message}")
-    
-    await client.close()
-```
-
-## 🔒 Безопасность
-
-### Хранение мнемоники
-
-- **Никогда** не коммитьте `.env` файлы в репозиторий
-- Используйте переменные окружения в production
-- Мнемоника автоматически очищается из памяти после инициализации кошелька
 
 ### Whitelist доменов
 
 ```python
-# Защита от фишинга
-await client.init(allowed_domains=["trusted-app.com"])
+from TonConnect import TonConnectClient
+from TonConnect.types import TonConnectResultCode
+
+async def secure_connect(tc_url: str):
+    async with TonConnectClient() as client:
+        await client.init(allowed_domains=["app.dedust.io", "ston.fi", "app.evaa.finance"])
+        result = await client.connect(tc_url)
+
+        if result.code == TonConnectResultCode.FORBIDDEN:
+            print(f"⛔ Домен заблокирован: {result.error_message}")
+        elif result.ok:
+            print(f"✅ Подключено за {result.data['elapsed_ms']} ms")
 ```
+
+### Настройка retry и таймаутов
+
+```python
+async with TonConnectClient(
+    connect_timeout=15,
+    request_timeout=60,
+    retry_attempts=5,
+    retry_base=1.0,
+) as client:
+    result = await client.connect(tc_url)
+```
+
+### Явный выбор версии кошелька
+
+```python
+from TonConnect import TonConnectClient
+from TonConnect.types import WalletVersion
+
+async with TonConnectClient(wallet_version=WalletVersion.V4R2) as client:
+    result = await client.connect(tc_url)
+```
+
+---
+
+## 🔒 Безопасность
+
+- **Никогда** не коммитьте `.env` файлы в репозиторий
+- Используйте переменные окружения в production
+- Мнемоника автоматически обнуляется в памяти после инициализации кошелька
+- Используйте `allowed_domains` для защиты от фишинговых dApps
+
+---
 
 ## ⚙️ Переменные окружения
 
@@ -197,6 +270,8 @@ await client.init(allowed_domains=["trusted-app.com"])
 |-----------|----------|--------------|
 | `TON_WALLET_MNEMONIC` | 24 слова seed phrase | ❌ Обязательно |
 | `TON_WALLET_VERSION` | Версия кошелька: `v5r1` или `v4r2` | `v5r1` |
+
+---
 
 ## 📄 Лицензия
 

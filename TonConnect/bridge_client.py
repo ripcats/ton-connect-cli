@@ -36,17 +36,25 @@ class BridgeClient:
         self,
         bridge_url: str,
         http_session: aiohttp.ClientSession,
+        retry_attempts: int = 3,
+        retry_base: float = 0.5,
     ):
         self.bridge_url = bridge_url
         self.http_session = http_session
+        self._retry_attempts = retry_attempts
+        self._retry_base = retry_base
 
     @staticmethod
     def encrypt_message(message: dict, connection_box) -> str:
         encrypted = connection_box.encrypt(orjson.dumps(message))
         return base64.b64encode(encrypted).decode()
 
-    @retry(max_attempts=3, backoff=exponential)
     async def send_to_bridge(self, client_id: str, to_id: str, payload: str):
+        backoff = lambda attempt: exponential(attempt, self._retry_base)
+        decorated = retry(self._retry_attempts, backoff)(self._send_request)
+        await decorated(self, client_id, to_id, payload)
+
+    async def _send_request(self, client_id: str, to_id: str, payload: str):
         async with self.http_session.post(
             f"{self.bridge_url}/message?client_id={client_id}&to={to_id}&ttl=300",
             data=payload,

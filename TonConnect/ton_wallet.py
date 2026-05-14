@@ -8,9 +8,10 @@ from nacl.public import PrivateKey, PublicKey, Box
 from pytoniq import LiteBalancer, WalletV5R1, WalletV4R2
 from pytoniq_core import Address
 from pytoniq_core.crypto.keys import mnemonic_to_private_key
+from loguru import logger
 
 from .proof_generator import build_ton_proof_item
-from .types import TonConnectErrorCode, TonConnectException
+from .types import TonConnectErrorCode, TonConnectException, WalletVersion
 
 
 def validate_mnemonic(mnemonic: str) -> list[str]:
@@ -38,9 +39,15 @@ def clear_mnemonic(words: list[str]):
 
 
 class HeadlessTonConnectWallet:
-    def __init__(self, seed_phrase: list[str], bridge_url: str):
+    def __init__(
+        self,
+        seed_phrase: list[str],
+        bridge_url: str,
+        wallet_version: Optional[WalletVersion] = None,
+    ):
         self.seed_phrase = seed_phrase
         self.bridge_url = bridge_url
+        self.wallet_version = wallet_version
         self.session_private_key = PrivateKey.generate()
         self.session_public_key = self.session_private_key.public_key
         self.client_id = self.session_public_key.encode().hex()
@@ -54,15 +61,17 @@ class HeadlessTonConnectWallet:
 
     async def init_wallet(self, timeout: Optional[float] = None):
         async def _do_init():
+            logger.debug("Starting LiteBalancer...")
             self.provider = LiteBalancer.from_mainnet_config(1)
             await self.provider.start_up()
-            self.wallet, _ = await self._init_wallet()
+            self.wallet, version = await self._init_wallet()
             self.wallet_address = self.wallet.address.to_str(
                 is_bounceable=True, is_user_friendly=True
             )
             _, private_key = mnemonic_to_private_key(self.seed_phrase)
             self.wallet_private_key = private_key
             self.wallet_public_key = self.wallet.public_key.hex()
+            logger.debug(f"Wallet initialized: {self.wallet_address} ({version})")
 
         try:
             await asyncio.wait_for(_do_init(), timeout=timeout)
@@ -70,23 +79,24 @@ class HeadlessTonConnectWallet:
             clear_mnemonic(self.seed_phrase)
 
     async def _init_wallet(self):
-        forced_version = os.getenv("TON_WALLET_VERSION", "").strip().lower()
-        if forced_version in {"v4r2", "w4r2"}:
+        version = self.wallet_version
+        if version is None:
+            env_version = os.getenv("TON_WALLET_VERSION", "").strip().lower()
+            if env_version in {"v4r2", "w4r2"}:
+                version = WalletVersion.V4R2
+            else:
+                version = WalletVersion.V5R1
+
+        if version == WalletVersion.V4R2:
             wallet = await WalletV4R2.from_mnemonic(self.provider, self.seed_phrase)
-            return wallet, "v4r2"
-        if forced_version in {"v5r1", "w5r1"}:
+            return wallet, WalletVersion.V4R2
+        else:
             wallet = await WalletV5R1.from_mnemonic(
                 self.provider,
                 self.seed_phrase,
                 network_global_id=-239,
             )
-            return wallet, "v5r1"
-        wallet = await WalletV5R1.from_mnemonic(
-            self.provider,
-            self.seed_phrase,
-            network_global_id=-239,
-        )
-        return wallet, "v5r1"
+            return wallet, WalletVersion.V5R1
 
     def build_wallet_info(self) -> dict:
         state_init_cell = self.wallet.state_init.serialize()
