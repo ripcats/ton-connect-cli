@@ -82,10 +82,6 @@ class TonConnectClient:
         self._http_session: Optional[aiohttp.ClientSession] = None
         self._bridge_client: Optional[BridgeClient] = None
 
-    # ------------------------------------------------------------------
-    # Allowed-domains management
-    # ------------------------------------------------------------------
-
     @property
     def allowed_domains(self) -> Optional[set[str]]:
         """Current domain whitelist (``None`` means all domains are allowed)."""
