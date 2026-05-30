@@ -52,7 +52,7 @@ class BridgeClient:
     async def send_to_bridge(self, client_id: str, to_id: str, payload: str):
         backoff = lambda attempt: exponential(attempt, self._retry_base)
         decorated = retry(self._retry_attempts, backoff)(self._send_request)
-        await decorated(self, client_id, to_id, payload)
+        await decorated(client_id, to_id, payload)
 
     async def _send_request(self, client_id: str, to_id: str, payload: str):
         async with self.http_session.post(
