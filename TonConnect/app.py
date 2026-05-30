@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import json
 import os
 import time
 from typing import Optional
@@ -6,8 +8,11 @@ from typing import Optional
 import aiohttp
 from dotenv import load_dotenv
 from loguru import logger
+from nacl.encoding import RawEncoder
+from nacl.public import Box, PrivateKey, PublicKey
 
 from .bridge_client import BridgeClient
+from .proof_generator import build_ton_proof_item
 from .ton_wallet import HeadlessTonConnectWallet, validate_mnemonic
 from .types import (
     TonConnectErrorCode,
@@ -19,7 +24,9 @@ from .types import (
 from .url_parser import (
     extract_domain,
     get_tc_domain,
+    is_ton_login_url,
     parse_tc_url,
+    parse_ton_login_url,
     sanitize_allowed_domains,
     validate_tc_url,
 )
@@ -176,10 +183,12 @@ class TonConnectClient:
                 pass
 
     async def connect(self, tc_url: str) -> TonConnectResult:
-        """Connect to a dApp via a tc:// URL.
+        """Connect to a dApp via a tc:// or Tonkeeper ton-login URL.
 
         Args:
-            tc_url: TonConnect deep link starting with ``tc://``.
+            tc_url: TonConnect deep link (``tc://``) **or** a Tonkeeper
+                    ton-login deep link
+                    (``https://app.tonkeeper.com/ton-login/…``).
 
         Returns:
             TonConnectResult with code DAPP_CONNECTED, FORBIDDEN, or
@@ -188,6 +197,9 @@ class TonConnectClient:
         Raises:
             TonConnectException: If the URL is invalid or wallet is not initialized.
         """
+        if is_ton_login_url(tc_url):
+            return await self._connect_ton_login(tc_url)
+
         if not validate_tc_url(tc_url):
             raise TonConnectException(
                 TonConnectErrorCode.INVALID_TC_URL, "Invalid tc:// URL"
@@ -289,6 +301,121 @@ class TonConnectClient:
             )
         except Exception as e:
             logger.error(f"Unexpected error during connect: {e}")
+            return TonConnectResult(
+                code=TonConnectResultCode.DAPP_CONNECTED_FAILED,
+                error_code=TonConnectErrorCode.CONNECT_FAILED,
+                error_message=str(e),
+            )
+
+    async def _connect_ton_login(self, url: str) -> TonConnectResult:
+        """Handle Tonkeeper ton-login v1 (ton-auth) deep-links.
+
+        Flow:
+          1. Parse the URL to get domain + temp_session
+          2. GET authRequest JSON (public endpoint, no auth needed)
+          3. Derive wallet keys offline (no TON liteserver)
+          4. Sign ton_proof using v1.session as the payload
+          5. Encrypt response JSON with NaCl Box(ephemeral_sk, server_session_pk)
+          6. POST {id, body} to authResponse callback
+        """
+        try:
+            started_ms = time.monotonic()
+            parsed = parse_ton_login_url(url)
+            domain = parsed["domain"]
+            auth_req_url = parsed["auth_request_url"]
+
+            logger.debug(f"ton-login domain={domain!r} fetching authRequest…")
+
+            if self._http_session is None:
+                self._http_session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(
+                        total=self.request_timeout, connect=self.connect_timeout
+                    )
+                )
+
+            if self._allowed_domains and domain.lower() not in self._allowed_domains:
+                logger.warning(f"Domain blocked by whitelist: {domain!r}")
+                return TonConnectResult(
+                    code=TonConnectResultCode.FORBIDDEN,
+                    error_code=TonConnectErrorCode.FORBIDDEN,
+                    error_message=f"Domain is not allowed: {domain}",
+                )
+
+            async with self._http_session.get(auth_req_url) as r:
+                auth_req = await r.json(content_type=None)
+
+            v1 = auth_req.get("v1", {})
+            session_b64: str = v1["session"]
+            callback_url: str = v1["callback_url"]
+
+            if self._wallet is None:
+                await self._init_wallet()
+
+            wallet_address = self._wallet.wallet_address
+            wallet_private_key = self._wallet.wallet_private_key
+            wallet_public_key = self._wallet.wallet_public_key
+            wallet_info = self._wallet.build_wallet_info()
+
+            ts = int(time.time())
+            proof_item = build_ton_proof_item(
+                wallet_address=wallet_address,
+                wallet_private_key=wallet_private_key,
+                payload=session_b64,
+                domain=domain,
+                timestamp=ts,
+            )
+            if not proof_item:
+                raise TonConnectException(
+                    TonConnectErrorCode.CONNECT_FAILED, "ton_proof signing returned None"
+                )
+
+            client_sk = PrivateKey.generate()
+            client_pk_b64 = base64.b64encode(bytes(client_sk.public_key)).decode()
+            server_pk = PublicKey(base64.b64decode(session_b64), encoder=RawEncoder)
+            box = Box(client_sk, server_pk)
+
+            response_payload = {
+                "clientId": client_pk_b64,
+                "items": [
+                    {
+                        "type": "ton-ownership",
+                        "address": wallet_info["address"],
+                        "proof": proof_item["proof"],
+                        "publicKey": wallet_public_key,
+                        "walletStateInit": wallet_info["walletStateInit"],
+                    }
+                ],
+            }
+            encrypted = box.encrypt(json.dumps(response_payload).encode())
+            body_b64 = base64.b64encode(bytes(encrypted)).decode()
+
+            async with self._http_session.post(
+                callback_url,
+                json={"id": client_pk_b64, "body": body_b64},
+                headers={"Content-Type": "application/json"},
+            ) as r:
+                cb_status = r.status
+                cb_text = await r.text()
+
+            elapsed_ms = int((time.monotonic() - started_ms) * 1000)
+            logger.info(
+                f"ton-login {domain!r}: callback HTTP {cb_status} in {elapsed_ms}ms"
+            )
+
+            return TonConnectResult(
+                code=TonConnectResultCode.DAPP_CONNECTED,
+                data={
+                    "domain": domain,
+                    "callback_status": cb_status,
+                    "callback_body": cb_text[:200],
+                    "elapsed_ms": elapsed_ms,
+                },
+            )
+
+        except TonConnectException:
+            raise
+        except Exception as e:
+            logger.error(f"ton-login connect failed: {e}")
             return TonConnectResult(
                 code=TonConnectResultCode.DAPP_CONNECTED_FAILED,
                 error_code=TonConnectErrorCode.CONNECT_FAILED,

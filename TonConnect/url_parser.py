@@ -9,6 +9,12 @@ import orjson
 
 TC_URL_REGEX = re.compile(r"^tc://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$")
 
+# Tonkeeper ton-login deep-link:
+# https://app.tonkeeper.com/ton-login/<domain>/tonkeeper/authRequest?id=<session>
+_TON_LOGIN_RE = re.compile(
+    r"^https://app\.tonkeeper\.com/ton-login/([^/]+)/.+\?.*\bid=([^&]+)"
+)
+
 _HOSTNAME_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]*$")
 
 
@@ -143,3 +149,34 @@ def sanitize_allowed_domains(domains: Optional[Iterable[str]]) -> Optional[set]:
         if d
     }
     return cleaned if cleaned else None
+
+
+def is_ton_login_url(url: str) -> bool:
+    """Return True for Tonkeeper ton-login deep-links."""
+    return bool(url and _TON_LOGIN_RE.match(url))
+
+
+def parse_ton_login_url(url: str) -> Dict:
+    """
+    Parse a Tonkeeper ton-login URL into a structured dict.
+
+    Input:  https://app.tonkeeper.com/ton-login/<domain>/tonkeeper/authRequest?id=<session>
+
+    Returns::
+
+        {
+            "domain":        str,   # dApp domain, e.g. "fragment.com"
+            "temp_session":  str,   # session ID
+            "auth_request_url": str,  # where to GET the authRequest JSON
+        }
+    """
+    m = _TON_LOGIN_RE.match(url)
+    if not m:
+        raise ValueError(f"Not a ton-login URL: {url!r}")
+    domain = m.group(1)
+    temp_session = m.group(2)
+    return {
+        "domain": domain,
+        "temp_session": temp_session,
+        "auth_request_url": f"https://{domain}/tonkeeper/authRequest?id={temp_session}",
+    }
