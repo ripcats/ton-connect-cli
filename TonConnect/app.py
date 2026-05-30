@@ -11,6 +11,12 @@ from loguru import logger
 from nacl.encoding import RawEncoder
 from nacl.public import Box, PrivateKey, PublicKey
 
+from pytoniq_core.tlb.account import StateInit
+from pytoniq_core.boc.address import Address as TonAddress
+from pytoniq_core.crypto.keys import mnemonic_to_private_key, private_key_to_public_key
+from pytoniq.contract.wallets.wallet_v5 import WALLET_V5_R1_CODE, WalletV5R1
+from pytoniq.contract.wallets.wallet import WALLET_V4_R2_CODE, WalletV4R2
+
 from .bridge_client import BridgeClient
 from .proof_generator import build_ton_proof_item
 from .ton_wallet import HeadlessTonConnectWallet, validate_mnemonic
@@ -307,6 +313,38 @@ class TonConnectClient:
                 error_message=str(e),
             )
 
+    def _derive_wallet_offline(self):
+        """Return (friendly_addr, private_key, public_key_hex, state_init_boc, raw_addr)
+        using only the mnemonic — no TON liteserver required."""
+        # mnemonic was stored before init() cleared it; read from env as fallback.
+        mnemonic_str = self.mnemonic or os.getenv("TON_WALLET_MNEMONIC", "")
+        words = [w.strip().lower() for w in mnemonic_str.strip().split()]
+        _, private_key = mnemonic_to_private_key(words)
+        public_key = private_key_to_public_key(private_key)
+
+        version = self.wallet_version
+        if version is None:
+            raw = os.getenv("TON_WALLET_VERSION", "").strip().lower()
+            version = WalletVersion.V4R2 if raw in ("v4r2", "w4r2") else WalletVersion.V5R1
+
+        if version == WalletVersion.V4R2:
+            data_cell = WalletV4R2.create_data_cell(public_key, wc=0)
+            code_cell = WALLET_V4_R2_CODE
+        else:
+            data_cell = WalletV5R1.create_data_cell(public_key, wc=0, network_global_id=-239)
+            code_cell = WALLET_V5_R1_CODE
+
+        state_init = StateInit(code=code_cell, data=data_cell)
+        state_init_cell = state_init.serialize()
+        addr = TonAddress((0, state_init_cell.hash))
+        return (
+            addr.to_str(is_bounceable=True, is_user_friendly=True),
+            private_key,
+            public_key.hex(),
+            base64.b64encode(state_init_cell.to_boc(has_idx=False)).decode(),
+            addr.to_str(is_user_friendly=False),
+        )
+
     async def _connect_ton_login(self, url: str) -> TonConnectResult:
         """Handle Tonkeeper ton-login v1 (ton-auth) deep-links.
 
@@ -348,13 +386,13 @@ class TonConnectClient:
             session_b64: str = v1["session"]
             callback_url: str = v1["callback_url"]
 
-            if self._wallet is None:
-                await self._init_wallet()
-
-            wallet_address = self._wallet.wallet_address
-            wallet_private_key = self._wallet.wallet_private_key
-            wallet_public_key = self._wallet.wallet_public_key
-            wallet_info = self._wallet.build_wallet_info()
+            # Derive wallet fully offline — no LiteBalancer / network needed.
+            wallet_address, wallet_private_key, wallet_public_key, state_init_boc, wallet_address_raw = \
+                self._derive_wallet_offline()
+            wallet_info = {
+                "address": wallet_address_raw,
+                "walletStateInit": state_init_boc,
+            }
 
             ts = int(time.time())
             proof_item = build_ton_proof_item(
