@@ -352,7 +352,7 @@ class TonConnectClient:
           1. Parse the URL to get domain + temp_session
           2. GET authRequest JSON (public endpoint, no auth needed)
           3. Derive wallet keys offline (no TON liteserver)
-          4. Sign ton_proof using v1.session as the payload
+          4. Sign ton_proof using v1.session_payload as the payload (challenge)
           5. Encrypt response JSON with NaCl Box(ephemeral_sk, server_session_pk)
           6. POST {id, body} to authResponse callback
         """
@@ -383,7 +383,8 @@ class TonConnectClient:
                 auth_req = await r.json(content_type=None)
 
             v1 = auth_req.get("v1", {})
-            session_b64: str = v1["session"]
+            session_b64: str = v1["session"]          # server X25519 pubkey (for encryption)
+            session_payload: str = v1["session_payload"]  # challenge (what we sign)
             callback_url: str = v1["callback_url"]
 
             # Derive wallet fully offline — no LiteBalancer / network needed.
@@ -398,7 +399,7 @@ class TonConnectClient:
             proof_item = build_ton_proof_item(
                 wallet_address=wallet_address,
                 wallet_private_key=wallet_private_key,
-                payload=session_b64,
+                payload=session_payload,
                 domain=domain,
                 timestamp=ts,
             )
