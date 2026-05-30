@@ -1,9 +1,12 @@
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import time
 from typing import Optional
+
+from pytoniq_core.crypto.signature import sign_message
 
 import aiohttp
 from dotenv import load_dotenv
@@ -18,7 +21,7 @@ from pytoniq.contract.wallets.wallet_v5 import WALLET_V5_R1_CODE, WalletV5R1
 from pytoniq.contract.wallets.wallet import WALLET_V4_R2_CODE, WalletV4R2
 
 from .bridge_client import BridgeClient
-from .proof_generator import build_ton_proof_item
+from .proof_generator import build_ton_proof_message, build_ton_proof_item
 from .ton_wallet import HeadlessTonConnectWallet, validate_mnemonic
 from .types import (
     TonConnectErrorCode,
@@ -396,17 +399,27 @@ class TonConnectClient:
             }
 
             ts = int(time.time())
-            proof_item = build_ton_proof_item(
-                wallet_address=wallet_address,
-                wallet_private_key=wallet_private_key,
-                payload=session_payload,
+
+            # session_payload is 96 raw bytes stored as base64 server-side.
+            # Fragment verifies against those raw bytes, so sign with raw bytes,
+            # NOT the UTF-8 bytes of the base64 string.
+            session_payload_bytes = base64.b64decode(session_payload)
+            proof_message = build_ton_proof_message(
+                payload=session_payload_bytes,
                 domain=domain,
+                address=wallet_address,
                 timestamp=ts,
             )
-            if not proof_item:
-                raise TonConnectException(
-                    TonConnectErrorCode.CONNECT_FAILED, "ton_proof signing returned None"
-                )
+            inner_hash = hashlib.sha256(proof_message).digest()
+            final_hash = hashlib.sha256(b"\xff\xff" + b"ton-connect" + inner_hash).digest()
+            proof_signature = sign_message(final_hash, wallet_private_key)
+
+            proof = {
+                "timestamp": ts,
+                "domain": {"lengthBytes": len(domain.encode()), "value": domain},
+                "signature": base64.b64encode(proof_signature).decode(),
+                "payload": session_payload,  # b64 string — matches what server issued
+            }
 
             client_sk = PrivateKey.generate()
             client_pk_b64 = base64.b64encode(bytes(client_sk.public_key)).decode()
@@ -419,7 +432,7 @@ class TonConnectClient:
                     {
                         "type": "ton-ownership",
                         "address": wallet_info["address"],
-                        "proof": proof_item["proof"],
+                        "proof": proof,
                         "publicKey": wallet_public_key,
                         "walletStateInit": wallet_info["walletStateInit"],
                     }
